@@ -1,0 +1,946 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>TimerSport</title>
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;600;700&family=Rajdhani:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body,#root{min-height:100vh;width:100%}
+body{background:#0D0D0D;color:#fff;font-family:'Rajdhani',sans-serif;overflow-x:hidden}
+::-webkit-scrollbar{width:3px}
+::-webkit-scrollbar-thumb{background:#FF4500;border-radius:2px}
+button{font-family:'Rajdhani',sans-serif;transition:transform 0.1s,opacity 0.1s}
+button:active{transform:scale(0.96);opacity:0.85}
+@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.04)}}
+@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+@keyframes countPop{0%{transform:scale(0.2);opacity:0}60%{transform:scale(1.15)}100%{transform:scale(1);opacity:1}}
+@keyframes bgPulse{0%,100%{opacity:0.05}50%{opacity:0.13}}
+@keyframes ringShake{0%,100%{transform:translateX(0)}15%{transform:translateX(-5px)}30%{transform:translateX(5px)}45%{transform:translateX(-3px)}60%{transform:translateX(3px)}75%{transform:translateX(-1px)}90%{transform:translateX(1px)}}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useRef,useCallback}=React;
+
+/* ============================================================
+   AUDIO ENGINE — singleton global, resume systématique
+   ============================================================ */
+let _audioCtx=null;
+function getAudioCtx(){
+  if(!_audioCtx) _audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+  return _audioCtx;
+}
+async function resumeAndPlay(fn){
+  const ctx=getAudioCtx();
+  try{ if(ctx.state!=='running') await ctx.resume(); }catch(e){}
+  fn(ctx);
+}
+
+/* ============================================================
+   CLOCHE DE BOXE PROFESSIONNELLE
+   Son UNIQUE pour TOUTES les transitions de phase
+   ============================================================ */
+function playBoxingBell(vol=1){
+  resumeAndPlay(ctx=>{
+    const t=ctx.currentTime;
+    const master=ctx.createGain();
+    master.gain.value=vol*0.9;
+    master.connect(ctx.destination);
+
+    // Transient impact — bruit blanc filtré 0-40ms
+    const impBuf=ctx.createBuffer(1,Math.floor(ctx.sampleRate*0.04),ctx.sampleRate);
+    const impData=impBuf.getChannelData(0);
+    for(let i=0;i<impData.length;i++) impData[i]=(Math.random()*2-1);
+    const imp=ctx.createBufferSource(); imp.buffer=impBuf;
+    const bpf=ctx.createBiquadFilter(); bpf.type='bandpass'; bpf.frequency.value=900; bpf.Q.value=0.8;
+    const ig=ctx.createGain();
+    ig.gain.setValueAtTime(vol*1.4,t); ig.gain.exponentialRampToValueAtTime(0.001,t+0.04);
+    imp.connect(bpf); bpf.connect(ig); ig.connect(master);
+    imp.start(t); imp.stop(t+0.05);
+
+    // Fondamentale 750Hz + vibrato
+    const fund=ctx.createOscillator(); fund.type='triangle'; fund.frequency.value=750;
+    const vibLfo=ctx.createOscillator(); vibLfo.type='sine'; vibLfo.frequency.value=6;
+    const vibG=ctx.createGain(); vibG.gain.value=2;
+    vibLfo.connect(vibG); vibG.connect(fund.frequency);
+    const fg=ctx.createGain();
+    fg.gain.setValueAtTime(vol*0.85,t); fg.gain.exponentialRampToValueAtTime(0.001,t+3.2);
+    fund.connect(fg); fg.connect(master);
+    fund.start(t); fund.stop(t+3.3);
+    vibLfo.start(t); vibLfo.stop(t+3.3);
+
+    // Harmoniques
+    [[1500,0.51,2.4],[2250,0.30,1.7],[3000,0.17,1.1],[3750,0.09,0.6]].forEach(([freq,amp,decay])=>{
+      const o=ctx.createOscillator(); o.type='sine'; o.frequency.value=freq;
+      const g=ctx.createGain();
+      g.gain.setValueAtTime(vol*amp,t); g.gain.exponentialRampToValueAtTime(0.001,t+decay);
+      o.connect(g); g.connect(master); o.start(t); o.stop(t+decay+0.1);
+    });
+
+    // Double réverbération (salle de sport)
+    [[0.035,0.12,0.18],[0.08,0.15,0.14]].forEach(([delayT,fbGain,outGain])=>{
+      const d=ctx.createDelay(0.2); d.delayTime.value=delayT;
+      const fb=ctx.createGain(); fb.gain.value=fbGain;
+      const dg=ctx.createGain(); dg.gain.value=outGain;
+      fg.connect(d); d.connect(fb); fb.connect(d); d.connect(dg); dg.connect(master);
+    });
+  });
+}
+
+function playBip(freq=1000,dur=0.1,vol=0.5){
+  resumeAndPlay(ctx=>{
+    const t=ctx.currentTime;
+    const o=ctx.createOscillator(),g=ctx.createGain();
+    o.type='sine'; o.frequency.value=freq;
+    g.gain.setValueAtTime(vol,t); g.gain.exponentialRampToValueAtTime(0.001,t+dur);
+    o.connect(g); g.connect(ctx.destination); o.start(t); o.stop(t+dur+0.02);
+  });
+}
+function playMidSound(){
+  resumeAndPlay(ctx=>{
+    const t=ctx.currentTime;
+    const o=ctx.createOscillator(),g=ctx.createGain();
+    o.type='triangle'; o.frequency.value=880;
+    g.gain.setValueAtTime(0.22,t); g.gain.exponentialRampToValueAtTime(0.001,t+0.5);
+    o.connect(g); g.connect(ctx.destination); o.start(t); o.stop(t+0.6);
+  });
+}
+function playCountBip(n){
+  const freqs={3:550,2:700,1:950};
+  playBip(freqs[n]||800,0.16,0.65);
+}
+
+/* ============================================================
+   UTILITAIRES
+   ============================================================ */
+const vib=(p)=>{try{navigator.vibrate&&navigator.vibrate(p)}catch(e){}};
+const fmt=(s)=>`${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
+const fmtMs=(ms)=>{
+  const m=Math.floor(ms/60000),s=Math.floor((ms%60000)/1000),cs=Math.floor((ms%1000)/10);
+  return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}:${String(cs).padStart(2,'0')}`;
+};
+
+/* ============================================================
+   DONNÉES
+   ============================================================ */
+const PHASE_NAMES={
+  rounds:    {work:'ROUND', rest:'CORNER'},
+  fractionne:{work:'SPRINT',rest:'RÉCUP'},
+  hiit:      {work:'EFFORT',rest:'REPOS'},
+};
+const PRESETS=[
+  {icon:'🥊',name:'Boxe',      color:'#FF4500',mode:'rounds',    work:180,rest:60, rounds:8},
+  {icon:'⚡',name:'Tabata',    color:'#FF8C00',mode:'rounds',    work:20, rest:10, rounds:8},
+  {icon:'🏃',name:'Fractionné',color:'#FFB300',mode:'fractionne',work:30, rest:30, rounds:10},
+  {icon:'🔥',name:'HIIT',      color:'#E91E63',mode:'hiit',      work:40, rest:20, rounds:6},
+];
+const MODES=[
+  {id:'rounds',    icon:'🥊',label:'Rounds',          desc:'Boxe · MMA · Arts martiaux'},
+  {id:'fractionne',icon:'🏃',label:'Fractionné Course',desc:'Sprint / Récupération'},
+  {id:'hiit',      icon:'🔥',label:'HIIT',             desc:'Haute intensité / Repos'},
+  {id:'libre',     icon:'⏱️',label:'Chrono Libre',     desc:'Chronomètre précis avec tours'},
+];
+const ADS=[
+  {brand:'SportMax Pro',msg:'Équipement performance — Livraison express 24h'},
+  {brand:'FitZone',     msg:'Nutrition sportive premium — Code FZ15 = -15%'},
+  {brand:'ProGear',     msg:'Tenues techniques respirantes — Nouvelle collection'},
+  {brand:'AthleteCore', msg:'Suppléments certifiés — Qualité olympique'},
+  {brand:'SpeedFit',    msg:'Chaussures running carbone — Essai 30 jours gratuit'},
+];
+const RECOVERY={
+  high:  '🔴 Séance intense — Repos 48h recommandé. Priorité : sommeil et hydratation.',
+  medium:'🟡 Bonne séance — Récupération active conseillée. Étirements demain.',
+  low:   '🟢 Séance légère — Tu peux t\'entraîner demain. Reste bien hydraté.',
+};
+function getRecovery(work,rounds){
+  const min=(work*rounds)/60;
+  if(min>20) return RECOVERY.high;
+  if(min>10) return RECOVERY.medium;
+  return RECOVERY.low;
+}
+
+/* ============================================================
+   LOGO SVG — Gants de boxe réalistes + Joggeur dynamique
+   ============================================================ */
+function Logo(){
+  return(
+    <svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <radialGradient id="bgGrad" cx="50%" cy="50%" r="60%">
+          <stop offset="0%" stopColor="#1a1a1a"/>
+          <stop offset="100%" stopColor="#0d0d0d"/>
+        </radialGradient>
+        <linearGradient id="gloveMain" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stopColor="#FF6020"/>
+          <stop offset="50%" stopColor="#FF4500"/>
+          <stop offset="100%" stopColor="#CC3300"/>
+        </linearGradient>
+        <linearGradient id="gloveHighlight" x1="0%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stopColor="#FF8C00" stopOpacity="0.9"/>
+          <stop offset="100%" stopColor="#FF4500" stopOpacity="0"/>
+        </linearGradient>
+        <linearGradient id="gloveShadow" x1="0%" y1="0%" x2="100%" y2="0%">
+          <stop offset="0%" stopColor="#882200" stopOpacity="0.7"/>
+          <stop offset="100%" stopColor="#882200" stopOpacity="0"/>
+        </linearGradient>
+        <linearGradient id="runnerGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stopColor="#FF8C00"/>
+          <stop offset="100%" stopColor="#FF4500"/>
+        </linearGradient>
+        <linearGradient id="runnerDark" x1="0%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stopColor="#FF6020"/>
+          <stop offset="100%" stopColor="#CC3300"/>
+        </linearGradient>
+        <clipPath id="leftHalf">
+          <rect x="0" y="0" width="31" height="64"/>
+        </clipPath>
+        <clipPath id="rightHalf">
+          <rect x="33" y="0" width="31" height="64"/>
+        </clipPath>
+      </defs>
+
+      {/* Fond */}
+      <rect width="64" height="64" rx="14" fill="url(#bgGrad)"/>
+
+      {/* === MOITIÉ GAUCHE — GANTS DE BOXE === */}
+      <g clipPath="url(#leftHalf)">
+        {/* Gant gauche — légèrement incliné vers la droite */}
+        <g transform="translate(5,10) rotate(-12,12,22)">
+          {/* Corps principal du gant */}
+          <ellipse cx="11" cy="22" rx="9" ry="13" fill="url(#gloveMain)"/>
+          {/* Renflement des doigts */}
+          <ellipse cx="11" cy="10" rx="8" ry="5" fill="#FF5010"/>
+          <ellipse cx="7"  cy="9"  rx="3" ry="2.5" fill="#FF6020"/>
+          <ellipse cx="11" cy="8"  rx="3" ry="2.5" fill="#FF6020"/>
+          <ellipse cx="15" cy="9"  rx="3" ry="2.5" fill="#FF6020"/>
+          {/* Couture centrale */}
+          <line x1="11" y1="12" x2="11" y2="30" stroke="#CC3300" strokeWidth="0.8" strokeDasharray="1.5,1"/>
+          {/* Logo circulaire sur le devant */}
+          <circle cx="11" cy="22" r="3.5" fill="#CC3300" opacity="0.7"/>
+          <circle cx="11" cy="22" r="2"   fill="#FF4500" opacity="0.5"/>
+          {/* Highlight lumière */}
+          <ellipse cx="8" cy="14" rx="3.5" ry="5" fill="url(#gloveHighlight)" opacity="0.6"/>
+          {/* Ombre côté */}
+          <ellipse cx="18" cy="20" rx="3" ry="8" fill="url(#gloveShadow)"/>
+          {/* Velcro poignet */}
+          <rect x="4" y="30" width="14" height="2.5" rx="1" fill="#CC3300"/>
+          <rect x="4" y="33" width="14" height="1.5" rx="0.7" fill="#AA2800"/>
+          {/* Texture velcro */}
+          <line x1="6"  y1="31.2" x2="6"  y2="32.3" stroke="#FF4500" strokeWidth="0.5"/>
+          <line x1="9"  y1="31.2" x2="9"  y2="32.3" stroke="#FF4500" strokeWidth="0.5"/>
+          <line x1="12" y1="31.2" x2="12" y2="32.3" stroke="#FF4500" strokeWidth="0.5"/>
+          <line x1="15" y1="31.2" x2="15" y2="32.3" stroke="#FF4500" strokeWidth="0.5"/>
+        </g>
+
+        {/* Gant droit — légèrement incliné vers la gauche */}
+        <g transform="translate(16,12) rotate(10,8,22)">
+          <ellipse cx="9" cy="22" rx="8.5" ry="12" fill="url(#gloveMain)"/>
+          <ellipse cx="9" cy="11" rx="7.5" ry="4.5" fill="#FF5010"/>
+          <ellipse cx="5.5" cy="10" rx="2.8" ry="2.3" fill="#FF6020"/>
+          <ellipse cx="9"   cy="9"  rx="2.8" ry="2.3" fill="#FF6020"/>
+          <ellipse cx="12.5"cy="10" rx="2.8" ry="2.3" fill="#FF6020"/>
+          <line x1="9" y1="13" x2="9" y2="29" stroke="#CC3300" strokeWidth="0.8" strokeDasharray="1.5,1"/>
+          <circle cx="9" cy="21" r="3" fill="#CC3300" opacity="0.7"/>
+          <circle cx="9" cy="21" r="1.8" fill="#FF4500" opacity="0.5"/>
+          <ellipse cx="6.5" cy="14" rx="3" ry="4.5" fill="url(#gloveHighlight)" opacity="0.55"/>
+          <rect x="2" y="29" width="13" height="2.5" rx="1" fill="#CC3300"/>
+          <rect x="2" y="32" width="13" height="1.5" rx="0.7" fill="#AA2800"/>
+          <line x1="4"  y1="30.2" x2="4"  y2="31.3" stroke="#FF4500" strokeWidth="0.5"/>
+          <line x1="7"  y1="30.2" x2="7"  y2="31.3" stroke="#FF4500" strokeWidth="0.5"/>
+          <line x1="10" y1="30.2" x2="10" y2="31.3" stroke="#FF4500" strokeWidth="0.5"/>
+          <line x1="13" y1="30.2" x2="13" y2="31.3" stroke="#FF4500" strokeWidth="0.5"/>
+        </g>
+      </g>
+
+      {/* Séparateur central */}
+      <line x1="32" y1="6" x2="32" y2="58" stroke="#FF4500" strokeWidth="0.8" opacity="0.4"/>
+
+      {/* === MOITIÉ DROITE — JOGGEUR RÉALISTE === */}
+      <g clipPath="url(#rightHalf)">
+        <g transform="translate(35,6)">
+          {/* Traînées de vitesse */}
+          <line x1="0"  y1="24" x2="-3" y2="24" stroke="#FF4500" strokeWidth="0.8" opacity="0.3"/>
+          <line x1="0"  y1="28" x2="-4" y2="29" stroke="#FF4500" strokeWidth="0.7" opacity="0.2"/>
+          <line x1="0"  y1="32" x2="-3" y2="33" stroke="#FF4500" strokeWidth="0.6" opacity="0.15"/>
+
+          {/* Tête */}
+          <circle cx="18" cy="7" r="5" fill="url(#runnerGrad)"/>
+          {/* Cheveux en mouvement vers l'arrière */}
+          <path d="M13,4 Q10,2 8,3 Q10,5 13,5" fill="#CC3300"/>
+          <path d="M13,3 Q9,1 7,2 Q9,4 13,4" fill="#AA2800" opacity="0.7"/>
+          {/* Visage suggéré */}
+          <circle cx="19" cy="6.5" r="0.7" fill="#CC3300" opacity="0.5"/>
+
+          {/* Buste incliné vers l'avant */}
+          <path d="M16,12 Q18,11 20,12 L21,26 Q18,27 15,26 Z" fill="url(#runnerGrad)"/>
+          {/* Détail haut de sport */}
+          <line x1="16" y1="16" x2="21" y2="16" stroke="#CC3300" strokeWidth="0.5" opacity="0.6"/>
+
+          {/* Short */}
+          <path d="M15,24 Q18,25 21,24 L22,32 Q18,33 14,32 Z" fill="#CC3300"/>
+
+          {/* Bras gauche (devant) — vers l'avant, opposé jambe avant */}
+          <path d="M20,13 Q24,16 25,22" stroke="url(#runnerDark)" strokeWidth="3"
+            fill="none" strokeLinecap="round"/>
+          {/* Main gauche */}
+          <circle cx="25" cy="22" r="1.8" fill="#CC3300"/>
+
+          {/* Bras droit (derrière) — vers l'arrière */}
+          <path d="M16,14 Q12,17 11,22" stroke="#AA2800" strokeWidth="2.5"
+            fill="none" strokeLinecap="round" opacity="0.85"/>
+          <circle cx="11" cy="22" r="1.5" fill="#AA2800" opacity="0.85"/>
+
+          {/* Jambe droite (avant) — genou levé haut */}
+          {/* Cuisse */}
+          <path d="M18,30 Q22,32 23,38" stroke="url(#runnerGrad)" strokeWidth="3.5"
+            fill="none" strokeLinecap="round"/>
+          {/* Mollet replié — position sprint */}
+          <path d="M23,38 Q25,36 24,32" stroke="url(#runnerGrad)" strokeWidth="3"
+            fill="none" strokeLinecap="round"/>
+          {/* Chaussure running avant */}
+          <ellipse cx="24.5" cy="32" rx="4" ry="2" fill="#882200"/>
+          <ellipse cx="24.5" cy="31" rx="3.5" ry="1.3" fill="#AA2800"/>
+          {/* Semelle épaisse */}
+          <rect x="21" y="33" width="8" height="1.5" rx="0.7" fill="#661800"/>
+
+          {/* Jambe gauche (arrière) — tendue et décollée du sol */}
+          <path d="M16,30 Q12,34 10,42" stroke="#CC3300" strokeWidth="3"
+            fill="none" strokeLinecap="round" opacity="0.9"/>
+          {/* Pied arrière décollé */}
+          <path d="M10,42 Q9,44 11,45" stroke="#CC3300" strokeWidth="2.5"
+            fill="none" strokeLinecap="round" opacity="0.9"/>
+          {/* Chaussure arrière */}
+          <ellipse cx="10.5" cy="45" rx="3" ry="1.5" fill="#882200" opacity="0.85"/>
+          <rect x="8" y="46" width="6" height="1.2" rx="0.6" fill="#661800" opacity="0.85"/>
+        </g>
+      </g>
+    </svg>
+  );
+}
+
+/* ============================================================
+   COMPOSANT NumCtrl — appui long avec accélération 3 vitesses
+   ============================================================ */
+function NumCtrl({label,value,onChange,min,max,unit}){
+  const iv=useRef(null),t1=useRef(null),t2=useRef(null),t3=useRef(null);
+  const valRef=useRef(value);
+  valRef.current=value;
+
+  const stopAll=useCallback(()=>{
+    clearInterval(iv.current); clearTimeout(t1.current);
+    clearTimeout(t2.current); clearTimeout(t3.current);
+    iv.current=null;
+  },[]);
+
+  useEffect(()=>()=>stopAll(),[stopAll]);
+
+  const startPress=useCallback((dir)=>{
+    onChange(v=>Math.min(max,Math.max(min,(typeof v==='number'?v:valRef.current)+dir)));
+    t1.current=setTimeout(()=>{
+      iv.current=setInterval(()=>onChange(v=>Math.min(max,Math.max(min,v+dir))),100);
+      t2.current=setTimeout(()=>{
+        clearInterval(iv.current);
+        iv.current=setInterval(()=>onChange(v=>Math.min(max,Math.max(min,v+dir*5))),50);
+        t3.current=setTimeout(()=>{
+          clearInterval(iv.current);
+          iv.current=setInterval(()=>onChange(v=>Math.min(max,Math.max(min,v+dir*15))),30);
+        },2000);
+      },1500);
+    },500);
+  },[onChange,min,max]);
+
+  const btn={background:'transparent',border:'none',color:'#FF4500',fontSize:28,
+    width:50,height:50,cursor:'pointer',userSelect:'none',WebkitUserSelect:'none',touchAction:'none'};
+
+  return(
+    <div style={{display:'flex',flexDirection:'column',gap:6,flex:1,minWidth:80}}>
+      <span style={{fontSize:11,color:'#666',letterSpacing:1,textTransform:'uppercase'}}>{label}</span>
+      <div style={{display:'flex',alignItems:'center',background:'#1a1a1a',borderRadius:10,
+        border:'1px solid #2a2a2a',overflow:'hidden'}}>
+        <button style={btn}
+          onMouseDown={e=>{e.preventDefault();startPress(-1);}}
+          onMouseUp={stopAll} onMouseLeave={stopAll}
+          onTouchStart={e=>{e.preventDefault();startPress(-1);}}
+          onTouchEnd={e=>{e.preventDefault();stopAll();}}
+          onTouchCancel={e=>{e.preventDefault();stopAll();}}>−</button>
+        <div style={{flex:1,textAlign:'center',fontFamily:'Oswald',fontSize:20,
+          fontWeight:600,color:'#fff',userSelect:'none'}}>
+          {value}<span style={{fontSize:11,color:'#555',marginLeft:2}}>{unit}</span>
+        </div>
+        <button style={btn}
+          onMouseDown={e=>{e.preventDefault();startPress(1);}}
+          onMouseUp={stopAll} onMouseLeave={stopAll}
+          onTouchStart={e=>{e.preventDefault();startPress(1);}}
+          onTouchEnd={e=>{e.preventDefault();stopAll();}}
+          onTouchCancel={e=>{e.preventDefault();stopAll();}}>+</button>
+      </div>
+    </div>
+  );
+}
+
+function AdBanner(){
+  const ad=ADS[Math.floor(Math.random()*ADS.length)];
+  return(
+    <div style={{background:'#141414',border:'1px solid #222',borderRadius:8,padding:'7px 14px',
+      display:'flex',alignItems:'center',gap:10,width:'100%',maxWidth:500,margin:'0 auto'}}>
+      <span style={{fontSize:9,background:'#2a2a2a',padding:'2px 6px',borderRadius:4,
+        color:'#555',flexShrink:0,letterSpacing:1}}>PUB</span>
+      <div style={{flex:1,textAlign:'center',fontSize:12}}>
+        <span style={{color:'#FF8C00',fontWeight:600}}>{ad.brand}</span>
+        <span style={{color:'#555'}}> — {ad.msg}</span>
+      </div>
+    </div>
+  );
+}
+
+function CircularProgress({progress,phase,timeDisplay,currentRound,totalRounds,running,mode,bellAnim}){
+  const r=95,cx=115,cy=115,circ=2*Math.PI*r;
+  const dash=circ*(1-Math.max(0,Math.min(1,progress)));
+  const names=PHASE_NAMES[mode]||PHASE_NAMES.rounds;
+  const isRest=phase===names.rest;
+  const isDone=phase==='TERMINÉ';
+  const color=isDone?'#22C55E':isRest?'#3B82F6':'#FF4500';
+  return(
+    <div style={{position:'relative',width:230,height:230,margin:'0 auto',
+      animation:bellAnim?'ringShake 0.5s ease':undefined}}>
+      <svg width="230" height="230" style={{transform:'rotate(-90deg)'}}>
+        <circle cx={cx} cy={cy} r={r} fill="none" stroke="#1e1e1e" strokeWidth="14"/>
+        <circle cx={cx} cy={cy} r={r} fill="none" stroke={color} strokeWidth="14"
+          strokeDasharray={circ} strokeDashoffset={dash} strokeLinecap="round"
+          style={{transition:'stroke-dashoffset 0.9s linear,stroke 0.4s'}}/>
+      </svg>
+      <div style={{position:'absolute',inset:0,display:'flex',flexDirection:'column',
+        alignItems:'center',justifyContent:'center',gap:6}}>
+        <div style={{fontFamily:'Oswald,sans-serif',fontSize:58,fontWeight:700,
+          color:'#fff',lineHeight:1,textShadow:`0 0 30px ${color}44`,
+          animation:running&&!isRest?'pulse 1s ease-in-out infinite':undefined}}>
+          {timeDisplay}
+        </div>
+        {totalRounds>0&&(
+          <div style={{fontSize:12,color:'#555',letterSpacing:2}}>
+            {names.work} {currentRound}/{totalRounds}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   CHRONO LIBRE
+   ============================================================ */
+function ChronoLibre({onBack}){
+  const [ms,setMs]=useState(0);
+  const [running,setRunning]=useState(false);
+  const [laps,setLaps]=useState([]);
+  const startRef=useRef(null),accRef=useRef(0),rafRef=useRef(null);
+
+  const tick=useCallback(()=>{
+    setMs(accRef.current+(Date.now()-startRef.current));
+    rafRef.current=requestAnimationFrame(tick);
+  },[]);
+
+  const start=()=>{
+    getAudioCtx().resume().catch(()=>{});
+    startRef.current=Date.now(); setRunning(true);
+    rafRef.current=requestAnimationFrame(tick); vib([60]);
+  };
+  const pause=()=>{
+    accRef.current+=(Date.now()-startRef.current);
+    cancelAnimationFrame(rafRef.current); setRunning(false); vib([40]);
+  };
+  const reset=()=>{
+    cancelAnimationFrame(rafRef.current);
+    accRef.current=0; setMs(0); setRunning(false); setLaps([]); vib([30,30,30]);
+  };
+  const lap=()=>{
+    const cur=accRef.current+(running?Date.now()-startRef.current:0);
+    const prev=laps.length>0?laps[laps.length-1].total:0;
+    setLaps(l=>[...l,{n:l.length+1,split:cur-prev,total:cur}]);
+    playBip(660,0.08,0.3); vib([30]);
+  };
+
+  useEffect(()=>()=>cancelAnimationFrame(rafRef.current),[]);
+
+  const m=Math.floor(ms/60000),s=Math.floor((ms%60000)/1000),cs=Math.floor((ms%1000)/10);
+
+  return(
+    <div style={{minHeight:'100vh',background:'#0D0D0D',display:'flex',
+      flexDirection:'column',alignItems:'center',padding:'20px 16px 100px'}}>
+      <div style={{width:'100%',maxWidth:500}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:28}}>
+          <button onClick={onBack} style={{background:'#1a1a1a',border:'1px solid #2a2a2a',
+            color:'#777',borderRadius:10,padding:'9px 18px',cursor:'pointer',fontSize:14}}>← Retour</button>
+          <span style={{fontFamily:'Oswald',fontSize:13,color:'#555',letterSpacing:3}}>CHRONO LIBRE</span>
+          <div style={{width:80}}/>
+        </div>
+        <div style={{textAlign:'center',marginBottom:36}}>
+          <div style={{fontFamily:'Oswald',fontWeight:700,color:'#fff',lineHeight:1,fontSize:64,
+            letterSpacing:2,textShadow:running?'0 0 30px #FF450044':undefined,
+            animation:running?'pulse 1s ease-in-out infinite':undefined}}>
+            {String(m).padStart(2,'0')}:{String(s).padStart(2,'0')}
+          </div>
+          <div style={{fontFamily:'Oswald',fontSize:34,color:'#FF8C00',marginTop:6,fontWeight:600}}>
+            .{String(cs).padStart(2,'0')}
+          </div>
+          <div style={{fontSize:11,color:'#333',marginTop:6,letterSpacing:2}}>MM : SS . CS</div>
+        </div>
+        <div style={{display:'flex',gap:10,marginBottom:16}}>
+          {!running?(
+            <button onClick={start} style={{flex:2,padding:'20px 0',borderRadius:16,border:'none',
+              cursor:'pointer',background:'linear-gradient(135deg,#FF4500,#FF8C00)',
+              fontFamily:'Oswald',fontSize:22,fontWeight:700,color:'#fff'}}>
+              {ms===0?'▶  DÉMARRER':'▶  REPRENDRE'}
+            </button>
+          ):(
+            <button onClick={pause} style={{flex:2,padding:'20px 0',borderRadius:16,
+              border:'2px solid #FF4500',cursor:'pointer',background:'transparent',
+              fontFamily:'Oswald',fontSize:22,fontWeight:700,color:'#FF4500'}}>
+              ⏸  PAUSE
+            </button>
+          )}
+          <button onClick={lap} disabled={ms===0} style={{flex:1,padding:'20px 0',borderRadius:16,
+            border:'1px solid #2a2a2a',background:'#141414',color:ms>0?'#FF8C00':'#333',
+            cursor:ms>0?'pointer':'not-allowed',fontFamily:'Oswald',fontSize:16,fontWeight:600}}>
+            TOUR
+          </button>
+          <button onClick={reset} style={{flex:1,padding:'20px 0',borderRadius:16,
+            border:'1px solid #2a2a2a',background:'#141414',color:'#555',
+            cursor:'pointer',fontFamily:'Oswald',fontSize:16}}>RESET</button>
+        </div>
+        {laps.length>0&&(
+          <div style={{background:'#141414',borderRadius:14,border:'1px solid #1f1f1f',overflow:'hidden'}}>
+            <div style={{padding:'10px 16px',borderBottom:'1px solid #1f1f1f',display:'flex',justifyContent:'space-between'}}>
+              <span style={{fontSize:11,color:'#444',letterSpacing:2}}>TOUR</span>
+              <span style={{fontSize:11,color:'#444',letterSpacing:2}}>SPLIT</span>
+              <span style={{fontSize:11,color:'#444',letterSpacing:2}}>TOTAL</span>
+            </div>
+            <div style={{maxHeight:220,overflowY:'auto'}}>
+              {[...laps].reverse().map(l=>(
+                <div key={l.n} style={{padding:'10px 16px',borderBottom:'1px solid #111',
+                  display:'flex',justifyContent:'space-between',alignItems:'center',animation:'fadeIn 0.3s ease'}}>
+                  <span style={{fontFamily:'Oswald',fontSize:16,color:'#FF8C00',minWidth:36}}>#{l.n}</span>
+                  <span style={{fontFamily:'Oswald',fontSize:15,color:'#fff'}}>{fmtMs(l.split)}</span>
+                  <span style={{fontFamily:'Oswald',fontSize:13,color:'#555'}}>{fmtMs(l.total)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+      <div style={{position:'fixed',bottom:0,left:0,right:0,padding:'10px 16px 14px',
+        background:'#0D0D0D',borderTop:'1px solid #1a1a1a'}}><AdBanner/></div>
+    </div>
+  );
+}
+
+/* ============================================================
+   APPLICATION PRINCIPALE
+   ============================================================ */
+function App(){
+  const [screen,setScreen]=useState('home');
+  const [mode,setMode]=useState('rounds');
+  const [cfg,setCfg]=useState({work:180,rest:60,rounds:8});
+  const [ts,setTs]=useState({running:false,phase:'ROUND',cur:0,total:0,round:1,done:false});
+  const [muted,setMuted]=useState(false);
+  const [showAd,setShowAd]=useState(false);
+  const [adCd,setAdCd]=useState(3);
+  const [countdown,setCountdown]=useState(0);
+  const [sessionStats,setSessionStats]=useState(null);
+  const [bellAnim,setBellAnim]=useState(false);
+  const ivRef=useRef(null);
+  const bip3=useRef(false),midFired=useRef(false);
+  const wakeLock=useRef(null);
+  const totalWork=useRef(0),totalRest=useRef(0);
+  const mutedRef=useRef(muted); mutedRef.current=muted;
+  const modeRef=useRef(mode); modeRef.current=mode;
+  const cfgRef=useRef(cfg); cfgRef.current=cfg;
+
+  const triggerBell=useCallback(()=>{
+    setBellAnim(true); setTimeout(()=>setBellAnim(false),600);
+  },[]);
+
+  const unlockAudio=useCallback(()=>{
+    getAudioCtx().resume().catch(()=>{});
+  },[]);
+
+  const startTimer=useCallback((config,md)=>{
+    unlockAudio();
+    setMode(md); setCfg(config);
+    cfgRef.current=config; modeRef.current=md;
+    midFired.current=false; totalWork.current=0; totalRest.current=0;
+    setCountdown(3); setScreen('countdown');
+  },[unlockAudio]);
+
+  /* --- Countdown --- */
+  useEffect(()=>{
+    if(countdown<=0) return;
+    if(!mutedRef.current) playCountBip(countdown);
+    vib([70]);
+    if(countdown===1){
+      const t=setTimeout(()=>{
+        setCountdown(0);
+        const c=cfgRef.current,md=modeRef.current;
+        const wn=PHASE_NAMES[md]?.work||'ROUND';
+        setTs({running:true,phase:wn,cur:c.work,total:c.work,round:1,done:false});
+        bip3.current=false;
+        setScreen('timer');
+        // Cloche de début — IMMÉDIATE
+        if(!mutedRef.current){ playBoxingBell(); triggerBell(); }
+        vib([400]);
+        try{navigator.wakeLock?.request('screen').then(wl=>wakeLock.current=wl).catch(()=>{})}catch(e){}
+      },1000);
+      return()=>clearTimeout(t);
+    }
+    const t=setTimeout(()=>setCountdown(c=>c-1),1000);
+    return()=>clearTimeout(t);
+  },[countdown,triggerBell]);
+
+  /* --- Moteur timer — playBoxingBell() sur TOUTES les transitions --- */
+  useEffect(()=>{
+    if(!ts.running||ts.done) return;
+    const md=modeRef.current,c=cfgRef.current;
+    const wn=PHASE_NAMES[md]?.work||'ROUND';
+    const rn=PHASE_NAMES[md]?.rest||'REPOS';
+
+    ivRef.current=setInterval(()=>{
+      setTs(prev=>{
+        if(!prev.running||prev.done) return prev;
+        const next=prev.cur-1;
+        const isWork=prev.phase===wn;
+
+        if(isWork) totalWork.current+=1; else totalRest.current+=1;
+
+        // Alerte mi-session
+        const half=Math.floor((c.work*c.rounds)/2);
+        if(isWork&&totalWork.current===half&&!midFired.current){
+          midFired.current=true;
+          if(!mutedRef.current) playMidSound();
+          vib([80,50,80]);
+        }
+
+        // 3 bips urgents à 3 secondes de la fin (travail uniquement)
+        if(next===3&&!bip3.current&&isWork){
+          bip3.current=true;
+          if(!mutedRef.current){
+            playBip(1300,0.13,0.6);
+            setTimeout(()=>playBip(1300,0.13,0.6),160);
+            setTimeout(()=>playBip(1300,0.13,0.6),320);
+          }
+          vib([70,50,70,50,70,50]);
+        }
+
+        /* =====================================================
+           ZÉRO ATTEINT — playBoxingBell() DANS LES DEUX CAS
+           Travail→Repos ET Repos→Travail = même cloche
+           ===================================================== */
+        if(next<=0){
+          if(isWork){
+            if(prev.round>=c.rounds){
+              // FIN DE SESSION — cloche finale
+              if(!mutedRef.current){ playBoxingBell(); triggerBell(); }
+              vib([600,100,600]);
+              clearInterval(ivRef.current);
+              const stats={totalWork:totalWork.current,totalRest:totalRest.current,
+                rounds:c.rounds,recovery:getRecovery(c.work,c.rounds)};
+              setTimeout(()=>{setSessionStats(stats);setShowAd(true);setAdCd(3);},1200);
+              return{...prev,cur:0,done:true,running:false,phase:'TERMINÉ'};
+            }
+            // FIN DE TRAVAIL → REPOS — cloche identique
+            if(!mutedRef.current){ playBoxingBell(); triggerBell(); }
+            vib([300,80,300]);
+            bip3.current=false;
+            return{...prev,phase:rn,cur:c.rest,total:c.rest};
+          } else {
+            // FIN DE REPOS → NOUVEAU ROUND — cloche identique
+            const nr=prev.round+1;
+            if(nr>c.rounds){
+              if(!mutedRef.current){ playBoxingBell(); triggerBell(); }
+              vib([600,100,600]);
+              clearInterval(ivRef.current);
+              const stats={totalWork:totalWork.current,totalRest:totalRest.current,
+                rounds:c.rounds,recovery:getRecovery(c.work,c.rounds)};
+              setTimeout(()=>{setSessionStats(stats);setShowAd(true);setAdCd(3);},1200);
+              return{...prev,cur:0,done:true,running:false,phase:'TERMINÉ'};
+            }
+            if(!mutedRef.current){ playBoxingBell(); triggerBell(); }
+            vib([300]);
+            bip3.current=false;
+            return{...prev,phase:wn,cur:c.work,total:c.work,round:nr};
+          }
+        }
+        return{...prev,cur:next};
+      });
+    },1000);
+    return()=>clearInterval(ivRef.current);
+  },[ts.running,ts.done,triggerBell]);
+
+  useEffect(()=>{
+    if(!showAd||adCd<=0) return;
+    const t=setTimeout(()=>setAdCd(c=>c-1),1000);
+    return()=>clearTimeout(t);
+  },[showAd,adCd]);
+
+  const stopTimer=()=>{
+    clearInterval(ivRef.current);
+    try{wakeLock.current?.release?.()}catch(e){}
+    setTs({running:false,phase:'ROUND',cur:0,total:0,round:1,done:false});
+    setScreen('home');
+  };
+  const togglePause=()=>{setTs(p=>({...p,running:!p.running}));vib([60]);};
+
+  const names=PHASE_NAMES[mode]||PHASE_NAMES.rounds;
+  const isRest=ts.phase===names.rest;
+  const isDone=ts.phase==='TERMINÉ';
+  const phaseColor=isDone?'#22C55E':isRest?'#3B82F6':'#FF4500';
+  const bgTint=isDone?'rgba(34,197,94,0.04)':isRest?'rgba(59,130,246,0.05)':'rgba(255,69,0,0.05)';
+  const progress=ts.total>0?ts.cur/ts.total:0;
+
+  if(screen==='libre') return <ChronoLibre onBack={()=>setScreen('home')}/>;
+
+  if(screen==='countdown'&&countdown>0) return(
+    <div style={{minHeight:'100vh',background:'#0D0D0D',display:'flex',
+      flexDirection:'column',alignItems:'center',justifyContent:'center'}}>
+      <div style={{fontSize:13,color:'#444',letterSpacing:4,marginBottom:28,fontFamily:'Oswald'}}>PRÉPARE-TOI</div>
+      <div key={countdown} style={{fontFamily:'Oswald',fontSize:150,fontWeight:700,color:'#FF4500',
+        textShadow:'0 0 80px #FF450077',animation:'countPop 0.35s cubic-bezier(0.175,0.885,0.32,1.275)'}}>
+        {countdown}
+      </div>
+      <div style={{fontSize:14,color:'#333',marginTop:24,letterSpacing:3,fontFamily:'Oswald'}}>
+        {mode.toUpperCase()} · {cfg.rounds} ROUNDS
+      </div>
+    </div>
+  );
+
+  if(showAd) return(
+    <div style={{minHeight:'100vh',background:'#0D0D0D',display:'flex',
+      alignItems:'center',justifyContent:'center',padding:20}}>
+      <div style={{background:'#141414',border:'1px solid #2a2a2a',borderRadius:20,
+        padding:28,maxWidth:420,width:'100%',animation:'fadeIn 0.4s ease'}}>
+        <div style={{fontSize:10,color:'#444',marginBottom:18,letterSpacing:2,textAlign:'center'}}>PUBLICITÉ</div>
+        <div style={{background:'#1a1a1a',borderRadius:14,padding:24,marginBottom:20,textAlign:'center'}}>
+          <div style={{fontSize:38,marginBottom:10}}>💪</div>
+          <div style={{fontFamily:'Oswald',fontSize:22,color:'#FF8C00',marginBottom:6}}>SportMax Pro</div>
+          <div style={{fontSize:13,color:'#555'}}>Équipement performance · Qualité olympique</div>
+          <div style={{fontSize:12,color:'#FF4500',marginTop:8}}>→ sportmaxpro.com</div>
+        </div>
+        {sessionStats&&(
+          <div style={{background:'#111',borderRadius:12,padding:16,marginBottom:16,border:'1px solid #1f1f1f'}}>
+            <div style={{fontSize:11,color:'#FF4500',letterSpacing:2,marginBottom:12}}>📊 BILAN DE SESSION</div>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8,marginBottom:14}}>
+              {[
+                {val:`${Math.floor(sessionStats.totalWork/60)}m${sessionStats.totalWork%60}s`,label:'TRAVAIL',color:'#fff'},
+                {val:`${Math.floor(sessionStats.totalRest/60)}m${sessionStats.totalRest%60}s`,label:'REPOS',color:'#3B82F6'},
+                {val:sessionStats.totalRest>0?Math.round((sessionStats.totalWork/sessionStats.totalRest)*10)/10:'∞',label:'RATIO',color:'#FF8C00'},
+              ].map(({val,label,color})=>(
+                <div key={label} style={{textAlign:'center'}}>
+                  <div style={{fontFamily:'Oswald',fontSize:18,color}}>{val}</div>
+                  <div style={{fontSize:10,color:'#555',letterSpacing:1,marginTop:2}}>{label}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{background:'#1a1a1a',borderRadius:8,padding:'10px 12px',
+              fontSize:12,color:'#aaa',lineHeight:1.6}}>{sessionStats.recovery}</div>
+          </div>
+        )}
+        <button onClick={()=>{setShowAd(false);setScreen('home');}} disabled={adCd>0}
+          style={{width:'100%',padding:'16px',borderRadius:14,border:'none',
+            cursor:adCd>0?'not-allowed':'pointer',
+            background:adCd>0?'#1a1a1a':'linear-gradient(135deg,#FF4500,#FF8C00)',
+            color:adCd>0?'#444':'#fff',fontFamily:'Oswald',fontSize:18,fontWeight:700}}>
+          {adCd>0?`Fermer dans ${adCd}s…`:'✕  Continuer'}
+        </button>
+      </div>
+    </div>
+  );
+
+  if(screen==='timer') return(
+    <div style={{minHeight:'100vh',background:'#0D0D0D',display:'flex',
+      flexDirection:'column',alignItems:'center',padding:'20px 16px 100px',position:'relative'}}>
+      <div style={{position:'absolute',inset:0,background:bgTint,transition:'background 0.8s',
+        pointerEvents:'none',animation:'bgPulse 2s ease-in-out infinite'}}/>
+      <div style={{width:'100%',maxWidth:500,position:'relative',zIndex:1}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}>
+          <button onClick={stopTimer} style={{background:'#1a1a1a',border:'1px solid #2a2a2a',
+            color:'#777',borderRadius:10,padding:'9px 18px',cursor:'pointer',fontSize:14}}>← Stop</button>
+          <span style={{fontFamily:'Oswald',fontSize:12,color:'#444',letterSpacing:3}}>{mode.toUpperCase()}</span>
+          <button onClick={()=>setMuted(m=>!m)} style={{background:'#1a1a1a',border:'1px solid #2a2a2a',
+            borderRadius:10,padding:'9px 14px',cursor:'pointer',fontSize:18,color:muted?'#333':'#FF8C00'}}>
+            {muted?'🔇':'🔊'}
+          </button>
+        </div>
+        <div style={{display:'flex',justifyContent:'center',marginBottom:16}}>
+          <span style={{background:phaseColor+'18',border:`1px solid ${phaseColor}35`,color:phaseColor,
+            borderRadius:20,padding:'8px 28px',fontFamily:'Oswald',fontSize:18,fontWeight:700,
+            letterSpacing:4,transition:'all 0.4s',textShadow:`0 0 20px ${phaseColor}44`}}>
+            {ts.phase}
+          </span>
+        </div>
+        <div style={{marginBottom:24}}>
+          <CircularProgress progress={progress} phase={ts.phase} timeDisplay={fmt(ts.cur)}
+            currentRound={ts.round} totalRounds={cfg.rounds} running={ts.running}
+            mode={mode} bellAnim={bellAnim}/>
+        </div>
+        {mode==='hiit'&&(
+          <div style={{textAlign:'center',marginBottom:16,background:'#141414',
+            borderRadius:12,padding:'12px 20px',border:'1px solid #1f1f1f'}}>
+            <span style={{fontSize:12,color:'#555',letterSpacing:1}}>CALORIES EST. </span>
+            <span style={{color:'#FF8C00',fontFamily:'Oswald',fontSize:20}}>
+              ~{Math.round(((cfg.work+cfg.rest)*cfg.rounds/60)*8)} kcal
+            </span>
+          </div>
+        )}
+        {!ts.done?(
+          <div style={{display:'flex',gap:12}}>
+            <button onClick={togglePause} style={{flex:2,padding:'20px 0',borderRadius:16,
+              border:ts.running?'2px solid #FF4500':'none',cursor:'pointer',
+              fontFamily:'Oswald',fontSize:22,fontWeight:700,
+              background:ts.running?'transparent':'linear-gradient(135deg,#FF4500,#FF8C00)',
+              color:ts.running?'#FF4500':'#fff'}}>
+              {ts.running?'⏸  PAUSE':'▶  REPRENDRE'}
+            </button>
+            <button onClick={stopTimer} style={{flex:1,padding:'20px 0',borderRadius:16,
+              border:'1px solid #2a2a2a',background:'#141414',color:'#555',
+              cursor:'pointer',fontFamily:'Oswald',fontSize:20}}>■ STOP</button>
+          </div>
+        ):(
+          <div style={{textAlign:'center',padding:'16px 0',animation:'fadeIn 0.5s ease'}}>
+            <div style={{fontSize:52,marginBottom:10}}>🏆</div>
+            <div style={{fontFamily:'Oswald',fontSize:28,color:'#22C55E',marginBottom:6}}>SESSION TERMINÉE !</div>
+            <div style={{fontSize:13,color:'#555',marginBottom:24}}>Excellent travail. Récupère bien.</div>
+            <button onClick={stopTimer} style={{background:'linear-gradient(135deg,#FF4500,#FF8C00)',
+              border:'none',borderRadius:16,padding:'18px 52px',color:'#fff',
+              fontFamily:'Oswald',fontSize:20,cursor:'pointer'}}>ACCUEIL</button>
+          </div>
+        )}
+      </div>
+      <div style={{position:'fixed',bottom:0,left:0,right:0,padding:'10px 16px 14px',
+        background:'#0D0D0D',borderTop:'1px solid #1a1a1a',zIndex:10}}><AdBanner/></div>
+    </div>
+  );
+
+  if(screen==='config'){
+    const m=MODES.find(x=>x.id===mode);
+    return(
+      <div style={{minHeight:'100vh',background:'#0D0D0D',padding:'20px 16px 120px'}}>
+        <div style={{maxWidth:500,margin:'0 auto'}}>
+          <div style={{display:'flex',alignItems:'center',gap:14,marginBottom:28}}>
+            <button onClick={()=>setScreen('home')} style={{background:'#1a1a1a',border:'1px solid #2a2a2a',
+              color:'#777',borderRadius:10,padding:'9px 16px',cursor:'pointer',fontSize:14}}>←</button>
+            <div>
+              <div style={{fontFamily:'Oswald',fontSize:22,fontWeight:700}}>{m?.icon} {m?.label}</div>
+              <div style={{fontSize:13,color:'#555'}}>{m?.desc}</div>
+            </div>
+          </div>
+          <div style={{background:'#141414',borderRadius:16,padding:20,marginBottom:14,border:'1px solid #1f1f1f'}}>
+            <div style={{display:'flex',gap:12,flexWrap:'wrap',marginBottom:16}}>
+              <NumCtrl label="Travail" value={cfg.work}
+                onChange={v=>setCfg(c=>({...c,work:typeof v==='function'?Math.min(600,Math.max(5,v(c.work))):v}))}
+                min={5} max={600} unit="s"/>
+              <NumCtrl label="Repos" value={cfg.rest}
+                onChange={v=>setCfg(c=>({...c,rest:typeof v==='function'?Math.min(300,Math.max(0,v(c.rest))):v}))}
+                min={0} max={300} unit="s"/>
+            </div>
+            <NumCtrl label="Rounds" value={cfg.rounds}
+              onChange={v=>setCfg(c=>({...c,rounds:typeof v==='function'?Math.min(30,Math.max(1,v(c.rounds))):v}))}
+              min={1} max={30} unit="×"/>
+          </div>
+          {mode==='hiit'&&(
+            <div style={{background:'#141414',borderRadius:12,padding:'14px 18px',marginBottom:14,
+              border:'1px solid #1f1f1f',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+              <span style={{fontSize:13,color:'#666'}}>Calories estimées</span>
+              <span style={{fontFamily:'Oswald',fontSize:22,color:'#FF8C00'}}>
+                ~{Math.round(((cfg.work+cfg.rest)*cfg.rounds/60)*8)} kcal
+              </span>
+            </div>
+          )}
+          <div style={{background:'#141414',borderRadius:12,padding:'12px 16px',marginBottom:20,
+            border:'1px solid #1f1f1f',textAlign:'center'}}>
+            <div style={{fontSize:10,color:'#333',letterSpacing:2,marginBottom:4}}>ESPACE PUBLICITAIRE</div>
+            <div style={{fontSize:13,color:'#FF8C00'}}>AthleteCore — Suppléments certifiés qualité olympique</div>
+          </div>
+          <button onClick={()=>startTimer(cfg,mode)} style={{width:'100%',padding:'20px 0',
+            borderRadius:16,border:'none',cursor:'pointer',
+            background:'linear-gradient(135deg,#FF4500,#FF8C00)',
+            fontFamily:'Oswald',fontSize:24,fontWeight:700,color:'#fff',
+            boxShadow:'0 6px 24px #FF450033'}}>▶  LANCER LA SESSION</button>
+        </div>
+        <div style={{position:'fixed',bottom:0,left:0,right:0,padding:'10px 16px 14px',
+          background:'#0D0D0D',borderTop:'1px solid #1a1a1a'}}><AdBanner/></div>
+      </div>
+    );
+  }
+
+  return(
+    <div style={{minHeight:'100vh',background:'#0D0D0D',padding:'24px 16px 110px'}}>
+      <div style={{maxWidth:500,margin:'0 auto'}}>
+        <div style={{display:'flex',alignItems:'center',gap:14,marginBottom:36}}>
+          <Logo/>
+          <div>
+            <div style={{fontFamily:'Oswald',fontSize:30,fontWeight:700,
+              background:'linear-gradient(90deg,#FF4500,#FF8C00)',
+              WebkitBackgroundClip:'text',WebkitTextFillColor:'transparent'}}>TimerSport</div>
+            <div style={{fontSize:11,color:'#444',letterSpacing:3}}>ENTRAÎNE-TOI MIEUX</div>
+          </div>
+          <button onClick={()=>setMuted(m=>!m)} style={{marginLeft:'auto',background:'transparent',
+            border:'none',cursor:'pointer',fontSize:22,color:muted?'#333':'#FF8C00'}}>
+            {muted?'🔇':'🔊'}
+          </button>
+        </div>
+        <div style={{marginBottom:30}}>
+          <div style={{fontSize:11,color:'#FF4500',letterSpacing:3,marginBottom:12,fontWeight:600}}>
+            ⚡ DÉMARRAGE RAPIDE
+          </div>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+            {PRESETS.map((p,i)=>(
+              <button key={i} onClick={()=>startTimer({work:p.work,rest:p.rest,rounds:p.rounds},p.mode)}
+                style={{background:'#141414',border:`1px solid ${p.color}28`,borderRadius:14,
+                  padding:'16px 14px',cursor:'pointer',textAlign:'left',display:'flex',alignItems:'center',gap:12}}>
+                <span style={{fontSize:24}}>{p.icon}</span>
+                <div>
+                  <div style={{fontFamily:'Oswald',fontSize:16,fontWeight:600,color:'#fff'}}>{p.name}</div>
+                  <div style={{fontSize:11,color:'#444'}}>{p.work}s / {p.rest}s × {p.rounds}</div>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+        <div style={{marginBottom:20}}>
+          <div style={{fontSize:11,color:'#FF4500',letterSpacing:3,marginBottom:12,fontWeight:600}}>
+            🎯 MODES PERSONNALISÉS
+          </div>
+          <div style={{display:'flex',flexDirection:'column',gap:10}}>
+            {MODES.map(m=>(
+              <button key={m.id} onClick={()=>{
+                unlockAudio();
+                if(m.id==='libre') setScreen('libre');
+                else{setMode(m.id);setCfg({work:180,rest:60,rounds:8});setScreen('config');}
+              }} style={{background:'#141414',border:'1px solid #1f1f1f',borderRadius:14,
+                padding:'18px',cursor:'pointer',display:'flex',alignItems:'center',gap:16,textAlign:'left'}}>
+                <span style={{fontSize:28,flexShrink:0}}>{m.icon}</span>
+                <div style={{flex:1}}>
+                  <div style={{fontFamily:'Oswald',fontSize:18,fontWeight:600,color:'#fff'}}>{m.label}</div>
+                  <div style={{fontSize:13,color:'#444'}}>{m.desc}</div>
+                </div>
+                <span style={{color:'#FF4500',fontSize:20,flexShrink:0}}>›</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+      <div style={{position:'fixed',bottom:0,left:0,right:0,padding:'10px 16px 14px',
+        background:'#0D0D0D',borderTop:'1px solid #1a1a1a'}}><AdBanner/></div>
+    </div>
+  );
+}
+
+ReactDOM.render(<App/>,document.getElementById('root'));
+</script>
+</body>
+</html>
